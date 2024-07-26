@@ -162,7 +162,7 @@ where
         .unwrap_or("false") == "true")
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct Track {
     #[serde(rename = "@attr", default, deserialize_with = "attr_now_playing")]
     now_playing: bool,
