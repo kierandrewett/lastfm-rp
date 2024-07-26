@@ -1,6 +1,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use discord_rich_presence::activity::Timestamps;
 use dotenv::dotenv;
+use num_format::{Locale, ToFormattedString};
 use uuid::Uuid;
 use std::{error::Error, time::Instant};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -188,6 +189,8 @@ struct Track {
 struct Application {
     discord: DiscordIpcClient,
 
+    scrobble_count: i64,
+
     current_track: Option<Track>,
     current_track_started: SystemTime,
 
@@ -197,6 +200,13 @@ struct Application {
 impl Application {
     async fn process_loop(&mut self) {
         loop {
+            match self.update_scrobble_count().await {
+                Ok(_) => {},
+                Err(e) => {
+                    eprintln!("Last.fm: {}", e);
+                }
+            }
+
             match self.update_current_activity().await {
                 Ok(_) => {},
                 Err(e) => {
@@ -216,11 +226,13 @@ impl Application {
                     let album_art = track.image.to_vec();
                     let album_art_url = album_art.last().unwrap_or(&"blank_art");
 
+                    let lastfm_status_text = format!("Scrobbles: {}", self.scrobble_count.to_formatted_string(&Locale::en));
+
                     let assets = Assets::new()
                         .large_image(album_art_url)
                         .large_text(&status_text)
                         .small_image("lastfm")
-                        .small_text("Last.fm");
+                        .small_text(&lastfm_status_text);
 
                     let track_started = self.current_track_started.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
                     let timestamps = Timestamps::new()
@@ -333,12 +345,56 @@ impl Application {
         Ok(())
     }
 
+    async fn update_scrobble_count(&mut self) -> Result<(), Box<dyn Error>> {
+        let api_key = std::env::var("LASTFM_API_KEY")
+            .expect("Missing LASTFM_API_KEY env variable");
+
+        let username = std::env::var("LASTFM_USERNAME")
+            .expect("Missing LASTFM_USERNAME env variable");
+
+        let url_query = vec![
+            ("method", "user.getinfo".to_string()),
+            ("user", username),
+            ("format", "json".to_string()),
+            ("api_key", api_key.to_string()),
+        ];
+
+        let url = Url::parse_with_params("https://ws.audioscrobbler.com/2.0/", &url_query)
+            .unwrap();
+
+        let body = reqwest::get(url)
+            .await
+            .expect("Failed to contact Last.fm.")
+            .text()
+            .await
+            .expect("Failed get Last.fm response.");
+
+        let json: Value = serde_json::from_str(&body)
+            .expect("Failed to cast Last.fm response as JSON.");
+
+        self.scrobble_count = json
+            .as_object()
+            .ok_or("Failed to get Last.fm user info as object.")?
+            .get("user")
+            .ok_or("Failed to get Last.fm user info.")?
+            .get("playcount")
+            .ok_or("Failed to get play count.")?
+            .as_str()
+            .ok_or("Failed to cast play count as string.")?
+            .parse::<i64>()
+            .or(Err("Failed to cast play count as an integer."))?;
+
+        Ok(())
+    }
+
     fn new() -> Application {
         let discord = create_discord_client()
             .expect("Failed to create Discord RPC client");
 
         Application {
             discord,
+
+            scrobble_count: 0,
 
             current_track: None,
             current_track_started: SystemTime::now(),
@@ -351,7 +407,8 @@ impl Application {
 
 #[tokio::main]
 async fn main() {
-    dotenv().ok().expect("Failed to load .env");
+    // .env file may not exist
+    let _ = dotenv();
 
     let mut app = Application::new();
 
